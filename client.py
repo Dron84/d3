@@ -144,7 +144,7 @@ class PacketMask:
             try:
                 for line in data.split(b"\r\n"):
                     if line.startswith(b"X-D3-Data:"):
-                        return bytes.fromhex(line.split(b":")[1].strip().decode())
+                        return bytes.fromhex(line.split(b":", 1)[1].strip().decode())
                 return None
             except: return None
         return data
@@ -303,14 +303,14 @@ class SOCKS5Proxy:
                 return
             
             nmethods = header[1]
-            methods = await reader.read(nmethods)
+            methods = await reader.readexactly(nmethods)
             logger.debug(f"SOCKS5 handshake: ver=0x05 nmethods={nmethods} methods={methods!r}")
             
             writer.write(b"\x05\x00")
             await writer.drain()
             logger.debug("SOCKS5 handshake ответ отправлен")
             
-            req = await reader.read(4)
+            req = await reader.readexactly(4)
             logger.debug(f"SOCKS5 request raw: {req!r} ({len(req)} bytes)")
             if len(req) < 4:
                 logger.warning(f"SOCKS5 короткий запрос: {req!r}")
@@ -321,19 +321,19 @@ class SOCKS5Proxy:
             logger.debug(f"SOCKS5: ver={ver:#x} cmd={cmd:#x} rsv={rsv:#x} atyp={atyp:#x}")
             
             if atyp == 0x01:
-                addr_data = await reader.read(4)
-                port_data = await reader.read(2)
+                addr_data = await reader.readexactly(4)
+                port_data = await reader.readexactly(2)
                 target_ip = socket.inet_ntoa(addr_data)
                 target_port = struct.unpack("!H", port_data)[0]
             elif atyp == 0x03:
-                domain_len_data = await reader.read(1)
-                domain = (await reader.read(domain_len_data[0])).decode()
-                port_data = await reader.read(2)
+                domain_len_data = await reader.readexactly(1)
+                domain = (await reader.readexactly(domain_len_data[0])).decode()
+                port_data = await reader.readexactly(2)
                 target_ip = domain
                 target_port = struct.unpack("!H", port_data)[0]
             elif atyp == 0x04:
-                addr_data = await reader.read(16)
-                port_data = await reader.read(2)
+                addr_data = await reader.readexactly(16)
+                port_data = await reader.readexactly(2)
                 target_ip = socket.inet_ntop(socket.AF_INET6, addr_data)
                 target_port = struct.unpack("!H", port_data)[0]
             else:

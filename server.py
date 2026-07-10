@@ -179,7 +179,7 @@ class PacketMask:
                 lines = data.split(b"\r\n")
                 for line in lines:
                     if line.startswith(b"X-D3-Data:"):
-                        hex_data = line.split(b":")[1].strip()
+                        hex_data = line.split(b":", 1)[1].strip()
                         return bytes.fromhex(hex_data.decode())
                 return None
             except:
@@ -672,22 +672,22 @@ class D3VPNServer:
                 await writer.drain()
                 logger.debug(f"TCP -> {dest_ip}:{dest_port} ({len(payload)} bytes)")
 
-            while True:
+while True:
                 try:
-                    # Accumulate ALL data until remote closes or long idle
+                    # Accumulate ALL data until remote closes or 5s idle (end of response)
                     buffered = b""
-                    idle_timeout = 0.5  # 500ms idle = end of response
+                    idle_timeout = 5.0  # 5 seconds idle = end of response
                     while True:
                         try:
                             data = await asyncio.wait_for(reader.read(65535), timeout=idle_timeout)
                             if not data:
                                 break
                             buffered += data
-                            # If we got a big chunk, wait a bit more for potential continuation
+                            # If we got a big chunk, wait briefly for more
                             if len(data) >= 4096:
-                                idle_timeout = 0.1
-                            else:
                                 idle_timeout = 0.5
+                            else:
+                                idle_timeout = 5.0
                         except asyncio.TimeoutError:
                             # Idle timeout - assume end of this response
                             break
@@ -703,6 +703,9 @@ class D3VPNServer:
 
             writer.close()
             await writer.wait_closed()
+            self.active_connections.pop(key, None)
+        except Exception as e:
+            logger.error(f"TCP ошибка {dest_ip}:{dest_port}: {e}")
             self.active_connections.pop(key, None)
         except Exception as e:
             logger.error(f"TCP ошибка {dest_ip}:{dest_port}: {e}")

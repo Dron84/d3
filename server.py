@@ -252,8 +252,8 @@ class CertificateManager:
         try:
             cert = x509.load_pem_x509_certificate(cert_pem)
             self.ca_cert.public_key().verify(cert.signature, cert.tbs_certificate_bytes)
-            now = datetime.datetime.utcnow()
-            if cert.not_valid_before > now or cert.not_valid_after < now:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if cert.not_valid_before_utc > now or cert.not_valid_after_utc < now:
                 logger.warning("Сертификат клиента просрочен")
                 return False, "expired"
             name = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value

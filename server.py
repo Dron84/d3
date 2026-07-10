@@ -404,6 +404,7 @@ class D3VPNServer:
         self.routing_table: Dict[str, str] = {}
         self.tunnel = TunnelFactory.create(config.tunnel_mode)
         self.active_connections: Dict[str, Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
+        self._conn_req_ids: Dict[str, str] = {}
         
         # Балансировка
         self.balancer = None
@@ -620,19 +621,23 @@ class D3VPNServer:
                     writer.write(payload)
                     await writer.drain()
                     logger.debug(f"TCP -> {dest_ip}:{dest_port} ({len(payload)} bytes)")
+                self._conn_req_ids[key] = req_id
                 return
             except Exception:
                 self.active_connections.pop(key, None)
+                self._conn_req_ids.pop(key, None)
 
         try:
             logger.debug(f"TCP подключение -> {dest_ip}:{dest_port}")
             reader, writer = await asyncio.open_connection(dest_ip, dest_port)
             logger.debug(f"TCP подключено: {dest_ip}:{dest_port}")
             self.active_connections[key] = (reader, writer)
+            self._conn_req_ids[key] = req_id
 
             if client_id not in self.clients:
                 writer.close()
                 self.active_connections.pop(key, None)
+                self._conn_req_ids.pop(key, None)
                 return
 
             _, client_writer, _ = self.clients[client_id]
@@ -647,17 +652,20 @@ class D3VPNServer:
                     data = await asyncio.wait_for(reader.read(4096), timeout=30)
                     if not data:
                         break
-                    resp_packet = f"DST:{dest_ip}:{dest_port}:{req_id}:PAYLOAD:".encode() + data
+                    current_req_id = self._conn_req_ids.get(key, req_id)
+                    resp_packet = f"DST:{dest_ip}:{dest_port}:{current_req_id}:PAYLOAD:".encode() + data
                     await self._send(client_writer, resp_packet)
-                    logger.debug(f"TCP <- {dest_ip}:{dest_port} ({len(data)} bytes)")
+                    logger.debug(f"TCP <- {dest_ip}:{dest_port} ({len(data)} bytes, id={current_req_id})")
                 except asyncio.TimeoutError:
                     break
 
             writer.close()
             self.active_connections.pop(key, None)
+            self._conn_req_ids.pop(key, None)
         except Exception as e:
             logger.error(f"TCP ошибка {dest_ip}:{dest_port}: {e}")
             self.active_connections.pop(key, None)
+            self._conn_req_ids.pop(key, None)
     
     def _assign_ip(self, name: str) -> Optional[str]:
         if name in self.clients:

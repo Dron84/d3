@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-D3 Stealth VPN Server v1.0.0
+D3 Stealth VPN Server v0.0.1
 Поддерживает: каскадное подключение, балансировку нагрузки, маскировку, туннели
 ВСЁ В ОДНОМ ФАЙЛЕ
 """
@@ -19,11 +19,20 @@ import hmac
 import ipaddress
 import subprocess
 import datetime
+import logging
+import argparse
 from typing import Dict, Optional, Tuple, List, Any
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from math import radians, sin, cos, sqrt, atan2
+
+# ============================================
+# ЛОГИРОВАНИЕ
+# ============================================
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, handlers=[logging.StreamHandler(sys.stdout)])
+logger = logging.getLogger("D3Server")
 
 # ============================================
 # ЗАГРУЗКА КОНФИГУРАЦИИ
@@ -221,8 +230,15 @@ class CertificateManager:
                 self.ca_private_key = serialization.load_pem_private_key(f.read(), password=None)
             with open(config.ca_cert_path, "rb") as f:
                 self.ca_cert = x509.load_pem_x509_certificate(f.read())
-        except:
-            print("❌ CA не найден! Запустите: python3 d3_ca.py init")
+            logger.info(f"CA загружен: {config.ca_cert_path}")
+        except FileNotFoundError:
+            logger.error("Файлы CA не найдены!")
+            logger.error(f"Ожидается: {config.ca_cert_path}")
+            logger.error(f"            {config.ca_private_path}")
+            logger.error("Запустите: python d3_ca.py init")
+            raise
+        except Exception as e:
+            logger.error(f"Ошибка загрузки CA: {e}")
             raise
     
     def verify_certificate(self, cert_pem: bytes) -> Tuple[bool, Optional[str]]:
@@ -231,10 +247,12 @@ class CertificateManager:
             self.ca_cert.public_key().verify(cert.signature, cert.tbs_certificate_bytes, hashes.SHA256())
             now = datetime.datetime.utcnow()
             if cert.not_valid_before > now or cert.not_valid_after < now:
+                logger.warning("Сертификат клиента просрочен")
                 return False, "expired"
             name = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
             return True, name
-        except:
+        except Exception as e:
+            logger.warning(f"Сертификат не прошёл проверку: {e}")
             return False, None
 
 # ============================================
@@ -392,29 +410,29 @@ class D3VPNServer:
                 self.balancer.add_server(ServerNode(
                     id="local", host=config.host, port=config.port, location=config.server_location
                 ))
-            print(f"⚖️ Балансировщик: {config.balance_strategy}, серверов: {len(self.balancer.servers)}")
+            logger.info(f"Балансировщик: {config.balance_strategy}, серверов: {len(self.balancer.servers)}")
         
         # Каскад
         self.upstream_reader = None
         self.upstream_writer = None
         self.cascade_connected = False
         if config.cascade_mode and config.upstream_server:
-            print(f"🔗 Каскад: уровень {config.server_level} -> {config.upstream_server}")
+            logger.info(f"Каскад: уровень {config.server_level} -> {config.upstream_server}")
     
     def _generate_ip_pool(self):
         network = ipaddress.ip_network(self.config.vpn_subnet)
         return list(network.hosts())[1:]
     
     async def start(self):
-        print(f"🚀 D3 Stealth VPN Server v1.0.0")
-        print(f"📡 {self.config.host}:{self.config.port}")
-        print(f"🔌 Туннель: {self.config.tunnel_mode}")
-        print(f"🎭 Маскировка: {self.config.mask_mode}")
+        logger.info("D3 Stealth VPN Server v0.0.1")
+        logger.info(f"Слушаю: {self.config.host}:{self.config.port}")
+        logger.info(f"Туннель: {self.config.tunnel_mode}, Маскировка: {self.config.mask_mode}")
+        logger.info(f"Подсеть VPN: {self.config.vpn_subnet}")
         
         if self.balancer:
-            print(f"⚖️ Балансировка: {self.config.balance_strategy}")
+            logger.info(f"Балансировка: {self.config.balance_strategy}")
         if self.config.cascade_mode:
-            print(f"🔗 Каскад: уровень {self.config.server_level}")
+            logger.info(f"Каскад: уровень {self.config.server_level}")
         
         if self.config.allow_internet:
             await self._setup_nat()
@@ -442,14 +460,16 @@ class D3VPNServer:
     # ============================================
     async def _handle_client(self, reader, writer):
         client_addr = writer.get_extra_info('peername')
-        print(f"🔗 Подключение: {client_addr}")
+        logger.info(f"Новое соединение: {client_addr}")
         
         try:
             raw = await self.tunnel.receive(reader)
             if not raw:
+                logger.warning(f"Пустой запрос от {client_addr}")
                 return
             data = await PacketMask.remove(raw, self.config.mask_mode)
             if not data:
+                logger.warning(f"Не удалось декодировать данные от {client_addr}")
                 return
             
             # Проверка: upstream или клиент?
@@ -459,11 +479,13 @@ class D3VPNServer:
             
             # Аутентификация клиента
             if len(data) < 2:
+                logger.warning(f"Слишком короткий запрос от {client_addr}")
                 return
             cert_len = struct.unpack(">H", data[:2])[0]
             cert_pem = data[2:2+cert_len]
             valid, client_name = self.cert_manager.verify_certificate(cert_pem)
             if not valid:
+                logger.warning(f"Аутентификация отклонена: сертификат невалиден (адрес: {client_name or client_addr})")
                 await self._send(writer, b"AUTH_FAILED")
                 return
             
@@ -473,16 +495,19 @@ class D3VPNServer:
             try:
                 cert = x509.load_pem_x509_certificate(cert_pem)
                 cert.public_key().verify(signature, nonce)
-            except:
+            except Exception as e:
+                logger.warning(f"Проверка подписи не пройдена для клиента '{client_name}': {e}")
                 await self._send(writer, b"AUTH_FAILED")
                 return
+            
+            logger.info(f"Клиент '{client_name}' прошёл аутентификацию (адрес: {client_addr})")
             
             # Балансировка: выбор сервера
             if self.balancer:
                 loc = self._get_location(client_addr[0])
                 target = await self.balancer.select(client_name, loc)
                 if target and target.id != "local":
-                    print(f"🔄 Перенаправление {client_name} -> {target.id}")
+                    logger.info(f"Балансировщик: '{client_name}' -> сервер '{target.id}' ({target.host}:{target.port})")
                     await self._send(writer, json.dumps({
                         "type": "redirect",
                         "host": target.host,
@@ -495,13 +520,14 @@ class D3VPNServer:
             await self._handle_local_client(client_name, reader, writer, client_addr)
             
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
+            logger.error(f"Ошибка обработки клиента {client_addr}: {e}")
         finally:
             writer.close()
     
     async def _handle_local_client(self, name: str, reader, writer, addr):
         ip = self._assign_ip(name)
         if not ip:
+            logger.error(f"Пул IP исчерпан, клиент '{name}' отклонён")
             await self._send(writer, b"IP_POOL_EXHAUSTED")
             return
         
@@ -514,7 +540,7 @@ class D3VPNServer:
                     s.connections += 1
                     s.current_load = s.connections / s.max_connections
         
-        print(f"✅ {name} подключён, IP: {ip}")
+        logger.info(f"Клиент '{name}' подключён, выделен IP: {ip} (всего: {len(self.clients)})")
         await self._send_config(writer, ip)
         
         while True:
@@ -535,6 +561,8 @@ class D3VPNServer:
                 if s.id == "local":
                     s.connections = max(0, s.connections - 1)
                     s.current_load = s.connections / s.max_connections
+        
+        logger.info(f"Клиент '{name}' отключён (IP: {ip}, осталось: {len(self.clients)})")
     
     async def _route_packet(self, data: bytes, sender: str):
         try:
@@ -572,7 +600,7 @@ class D3VPNServer:
                 _, writer, _ = self.clients[client_id]
                 await self._send(writer, response)
         except Exception as e:
-            print(f"⚠️ NAT ошибка: {e}")
+            logger.error(f"NAT ошибка для клиента '{client_id}': {e}")
     
     def _assign_ip(self, name: str) -> Optional[str]:
         if name in self.clients:
@@ -605,7 +633,7 @@ class D3VPNServer:
     # КАСКАД (UPSTREAM)
     # ============================================
     async def _handle_upstream(self, data: bytes, reader, writer):
-        print(f"🔗 Upstream подключение (уровень {self.config.server_level})")
+        logger.info(f"Upstream подключение (уровень {self.config.server_level})")
         self.upstream_reader = reader
         self.upstream_writer = writer
         self.cascade_connected = True
@@ -614,6 +642,7 @@ class D3VPNServer:
         while True:
             raw = await self.tunnel.receive(reader)
             if not raw:
+                logger.warning("Upstream соединение разорвано")
                 break
             data = await PacketMask.remove(raw, self.config.mask_mode)
             if data:
@@ -628,7 +657,7 @@ class D3VPNServer:
             try:
                 host, port = self.config.upstream_server.split(":")
                 port = int(port)
-                print(f"🔗 Подключение к upstream {host}:{port}")
+                logger.info(f"Подключение к upstream {host}:{port}")
                 reader, writer = await asyncio.open_connection(host, port)
                 
                 # Отправляем UPSTREAM пакет
@@ -639,7 +668,7 @@ class D3VPNServer:
                 if raw:
                     data = await PacketMask.remove(raw, self.config.mask_mode)
                     if data == b"AUTH_SUCCESS":
-                        print("✅ Upstream подключён")
+                        logger.info(f"Upstream подключён: {host}:{port}")
                         self.upstream_reader = reader
                         self.upstream_writer = writer
                         self.cascade_connected = True
@@ -655,7 +684,7 @@ class D3VPNServer:
                                     pass
                             await asyncio.sleep(0.01)
             except Exception as e:
-                print(f"⚠️ Upstream ошибка: {e}")
+                logger.error(f"Upstream ошибка: {e}")
             await asyncio.sleep(5)
     
     # ============================================
@@ -667,7 +696,7 @@ class D3VPNServer:
             "0.0.0.0",
             config.balance_api_port
         )
-        print(f"🌐 API балансировщика: порт {config.balance_api_port}")
+        logger.info(f"API балансировщика: порт {config.balance_api_port}")
         async with server:
             await server.serve_forever()
     
@@ -732,14 +761,21 @@ class D3VPNServer:
                 "-s", self.config.vpn_subnet, "-o", "eth0",
                 "-j", "MASQUERADE"
             ], check=False)
-            print("🌐 NAT настроен")
-        except:
-            print("⚠️ NAT не настроен (нужны права root)")
+            logger.info("NAT настроен")
+        except Exception:
+            logger.warning("NAT не настроен (нужны права root)")
 
 # ============================================
 # ЗАПУСК
 # ============================================
 async def main():
+    parser = argparse.ArgumentParser(description="D3 Stealth VPN Server v0.0.1")
+    parser.add_argument("--debug", action="store_true", help="Включить отладочный вывод")
+    args = parser.parse_args()
+
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+
     server = D3VPNServer()
     await server.start()
 
@@ -747,4 +783,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n🛑 Сервер остановлен")
+        logger.info("Сервер остановлен")

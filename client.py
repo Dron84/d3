@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-D3 Stealth VPN Client v7.0.0
+D3 Stealth VPN Client v0.0.1
 Поддерживает: SOCKS5 прокси, маскировку, туннели, автоматическое перенаправление
 ВСЁ В ОДНОМ ФАЙЛЕ
 """
@@ -15,23 +15,37 @@ import time
 import random
 import json
 import argparse
+import logging
 from typing import Optional, Dict
 from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
 
 try:
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.backends import default_backend
-except:
-    print("⚠️ Установите: pip install cryptography")
+except Exception:
+    print("[ERROR] Установите: pip install cryptography")
     sys.exit(1)
+
+# ============================================
+# ЛОГИРОВАНИЕ
+# ============================================
+LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, handlers=[logging.StreamHandler(sys.stdout)])
+logger = logging.getLogger("D3Client")
 
 # ============================================
 # КОНФИГУРАЦИЯ
 # ============================================
 class ClientConfig:
-    def __init__(self):
+    def __init__(self, env_file: Optional[str] = None):
+        self._load_env(env_file)
         self.server_host = os.getenv("SERVER_HOST", "127.0.0.1")
         self.server_port = int(os.getenv("SERVER_PORT", "6666"))
         self.mask_mode = os.getenv("MASK_MODE", "https")
@@ -45,7 +59,30 @@ class ClientConfig:
         self.socks_port = int(os.getenv("SOCKS_PORT", "1080"))
         self.socks_enabled = os.getenv("SOCKS_ENABLED", "true").lower() == "true"
 
-config = ClientConfig()
+    def _load_env(self, env_file: Optional[str] = None):
+        if load_dotenv is None:
+            if env_file:
+                logger.warning("python-dotenv не установлен. Файл .env не будет загружен. pip install python-dotenv")
+            return
+
+        if env_file:
+            path = Path(env_file)
+            if path.exists():
+                load_dotenv(path, override=False)
+                logger.info(f"Загружен .env файл: {path.resolve()}")
+            else:
+                logger.warning(f"Файл .env не найден: {path.resolve()}. Используются значения по умолчанию.")
+        else:
+            # Автопоиск: .env.client, .env
+            candidates = [Path(".env.client"), Path(".env")]
+            for candidate in candidates:
+                if candidate.exists():
+                    load_dotenv(candidate, override=False)
+                    logger.info(f"Загружен .env файл: {candidate.resolve()}")
+                    return
+            logger.info("Файл .env не найден. Используются значения по умолчанию.")
+
+config: Optional[ClientConfig] = None
 
 # ============================================
 # МАСКИРОВКА
@@ -150,17 +187,52 @@ class CertificateLoader:
         self._load()
     
     def _load(self):
+        # Проверяем сертификат
         if config.cert_path.exists():
-            with open(config.cert_path, "rb") as f:
-                self.certificate = x509.load_pem_x509_certificate(f.read())
+            try:
+                with open(config.cert_path, "rb") as f:
+                    self.certificate = x509.load_pem_x509_certificate(f.read())
+                logger.info(f"Сертификат загружен: {config.cert_path}")
+            except Exception as e:
+                logger.error(f"Ошибка чтения сертификата {config.cert_path}: {e}")
+                logger.error("Перегенерируйте сертификат: python d3_ca.py issue " + config.client_name)
+                sys.exit(1)
+        else:
+            logger.error(f"Сертификат не найден: {config.cert_path}")
+            logger.error(f"Создайте его: python d3_ca.py issue {config.client_name}")
+            sys.exit(1)
+
+        # Проверяем приватный ключ
         if config.private_path.exists():
             import getpass
-            pwd = getpass.getpass(f"🔑 Пароль для {config.client_name}: ")
-            with open(config.private_path, "rb") as f:
-                self.private_key = serialization.load_pem_private_key(f.read(), password=pwd.encode())
-        if not self.certificate or not self.private_key:
-            print(f"❌ Сертификат не найден! Запустите: python3 d3_ca.py issue {config.client_name}")
+            pwd = getpass.getpass(f"Пароль для {config.client_name}: ")
+            try:
+                with open(config.private_path, "rb") as f:
+                    self.private_key = serialization.load_pem_private_key(f.read(), password=pwd.encode())
+                logger.info(f"Приватный ключ загружен: {config.private_path}")
+            except Exception as e:
+                error_str = str(e).lower()
+                if "password" in error_str or "bad decrypt" in error_str or "invalid" in error_str:
+                    logger.error("Неверный пароль от приватного ключа.")
+                else:
+                    logger.error(f"Ошибка чтения приватного ключа: {e}")
+                logger.error("Убедитесь, что пароль корректен и файл не повреждён.")
+                sys.exit(1)
+        else:
+            logger.error(f"Приватный ключ не найден: {config.private_path}")
+            logger.error(f"Создайте его: python d3_ca.py issue {config.client_name}")
             sys.exit(1)
+
+        # Проверяем, что ключ и сертификат совпадают
+        try:
+            cert_pub = self.certificate.public_key()
+            # Проверяем что тип ключа совпадает
+            if type(cert_pub) != type(self.private_key.public_key()):
+                logger.error("Несовпадение типа ключа: сертификат и приватный ключ используют разные алгоритмы.")
+                logger.error("Перегенерируйте сертификат: python d3_ca.py issue " + config.client_name)
+                sys.exit(1)
+        except Exception as e:
+            logger.warning(f"Не удалось проверить совпадение ключей: {e}")
     
     def get_cert_pem(self) -> bytes:
         return self.certificate.public_bytes(serialization.Encoding.PEM)
@@ -181,16 +253,19 @@ class SOCKS5Proxy:
     async def start(self):
         if not config.socks_enabled:
             return
-        print(f"🔌 SOCKS5 прокси: {self.host}:{self.port}")
+        logger.info(f"SOCKS5 прокси запущен: {self.host}:{self.port}")
         self.server = await asyncio.start_server(self._handle, self.host, self.port)
         async with self.server:
             await self.server.serve_forever()
     
     async def _handle(self, reader, writer):
+        client_addr = writer.get_extra_info('peername')
+        logger.debug(f"SOCKS5 новое соединение: {client_addr}")
         try:
             # Рукопожатие
             data = await reader.read(2)
             if len(data) < 2 or data[0] != 0x05:
+                logger.warning(f"SOCKS5 неверное рукопожатие от {client_addr}")
                 writer.close()
                 return
             writer.write(b"\x05\x00")
@@ -211,7 +286,7 @@ class SOCKS5Proxy:
             target_ip = socket.inet_ntoa(addr_data)
             target_port = struct.unpack("!H", port_data)[0]
             
-            print(f"🎯 {target_ip}:{target_port}")
+            logger.info(f"SOCKS5 запрос: {client_addr} -> {target_ip}:{target_port}")
             
             # Отправка через D3
             await self.d3_client._send_data(f"DST:{target_ip}:{target_port}:PAYLOAD:".encode())
@@ -229,9 +304,10 @@ class SOCKS5Proxy:
                 await self.d3_client._send_data(data)
                 
         except Exception as e:
-            print(f"⚠️ SOCKS5 ошибка: {e}")
+            logger.error(f"SOCKS5 ошибка ({client_addr}): {e}")
         finally:
             writer.close()
+            logger.debug(f"SOCKS5 соединение закрыто: {client_addr}")
 
 # ============================================
 # ОСНОВНОЙ КЛИЕНТ
@@ -249,14 +325,14 @@ class D3VPNClient:
         self.msg_queue = asyncio.Queue()
     
     async def connect(self):
-        print(f"🔗 Подключение к {self.config.server_host}:{self.config.server_port}")
-        print(f"🎭 Маскировка: {self.config.mask_mode}")
-        print(f"🔌 Туннель: {self.config.tunnel_mode}")
+        logger.info(f"Подключение к {self.config.server_host}:{self.config.server_port}")
+        logger.info(f"Маскировка: {self.config.mask_mode}, Туннель: {self.config.tunnel_mode}")
         
         try:
             self.reader, self.writer = await asyncio.open_connection(
                 self.config.server_host, self.config.server_port
             )
+            logger.info(f"TCP соединение установлено с {self.config.server_host}:{self.config.server_port}")
             
             # Аутентификация
             cert_pem = self.cert.get_cert_pem()
@@ -266,55 +342,79 @@ class D3VPNClient:
             
             masked = await PacketMask.apply(auth, self.config.mask_mode)
             await self.tunnel.send(self.writer, masked)
+            logger.debug("Отправлена аутентификация серверу")
             
             # Ответ
             raw = await self.tunnel.receive(self.reader)
             if raw:
                 data = await PacketMask.remove(raw, self.config.mask_mode)
-                if data and not data.startswith(b"AUTH_FAILED"):
+                if data:
+                    if data.startswith(b"AUTH_FAILED"):
+                        logger.error("Аутентификация отклонена сервером.")
+                        logger.error("Возможные причины:")
+                        logger.error("  - Сертификат клиента не подписан CA сервера")
+                        logger.error("  - Сертификат просрочен")
+                        logger.error("  - Неверная подпись")
+                        logger.error(f"  - Проверьте что сертификат для '{self.config.client_name}' выпущен тем же CA")
+                        self.writer.close()
+                        return
+
                     # Проверка на редирект
                     try:
                         msg = json.loads(data.decode())
                         if msg.get("type") == "redirect":
                             host, port = msg.get("host"), msg.get("port")
-                            print(f"🔄 Перенаправление на {host}:{port}")
+                            logger.info(f"Сервер перенаправляет на {host}:{port}")
                             self.config.server_host = host
                             self.config.server_port = port
-                            writer.close()
+                            self.writer.close()
                             await asyncio.sleep(1)
                             await self.connect()
                             return
-                    except:
+                    except (json.JSONDecodeError, UnicodeDecodeError):
                         pass
                     
                     try:
                         cfg = json.loads(data.decode())
                         self.vpn_ip = cfg.get("ip")
-                        print(f"✅ Подключён! IP: {self.vpn_ip}")
-                    except:
-                        pass
+                        logger.info(f"Подключён! VPN IP: {self.vpn_ip}")
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        logger.warning("Получен неизвестный ответ от сервера")
             
             # Запуск SOCKS5
             if config.socks_enabled:
                 asyncio.create_task(self.socks5.start())
             
             self.is_running = True
+            logger.info("Клиент запущ, ожидание данных...")
             await self._receive_loop()
             
+        except ConnectionRefusedError:
+            logger.error(f"Соединение отклонено: {self.config.server_host}:{self.config.server_port}")
+            logger.error("Убедитесь, что сервер запущен и доступен.")
+        except ConnectionError as e:
+            logger.error(f"Ошибка соединения: {e}")
+        except OSError as e:
+            logger.error(f"Сетевая ошибка: {e}")
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
+            logger.error(f"Непредвиденная ошибка: {e}")
     
     async def _receive_loop(self):
         try:
             while self.is_running:
                 raw = await self.tunnel.receive(self.reader)
                 if not raw:
+                    logger.warning("Соединение с сервером разорвано")
                     break
                 data = await PacketMask.remove(raw, self.config.mask_mode)
                 if data:
                     await self.msg_queue.put(data)
-        except:
+        except asyncio.CancelledError:
             pass
+        except Exception as e:
+            logger.error(f"Ошибка приёма данных: {e}")
+        finally:
+            self.is_running = False
     
     async def _send_data(self, data: bytes):
         masked = await PacketMask.apply(data, self.config.mask_mode)
@@ -323,32 +423,55 @@ class D3VPNClient:
     async def _receive_data(self, timeout: float = 5.0) -> Optional[bytes]:
         try:
             return await asyncio.wait_for(self.msg_queue.get(), timeout)
-        except:
+        except asyncio.TimeoutError:
             return None
 
 # ============================================
 # ЗАПУСК
 # ============================================
 async def main():
-    parser = argparse.ArgumentParser(description="D3 Stealth VPN Client v7.0.0")
-    parser.add_argument("--server", default=config.server_host)
-    parser.add_argument("--port", type=int, default=config.server_port)
-    parser.add_argument("--name", default=config.client_name)
-    parser.add_argument("--socks-port", type=int, default=config.socks_port)
-    parser.add_argument("--no-socks", action="store_true")
-    parser.add_argument("--mask", default=config.mask_mode)
-    parser.add_argument("--tunnel", default=config.tunnel_mode)
+    parser = argparse.ArgumentParser(description="D3 Stealth VPN Client v0.0.1")
+    parser.add_argument("--env", default=None, help="Путь к .env файлу конфигурации (по умолчанию: .env.client)")
+    parser.add_argument("--server", default=None, help="IP/домен сервера")
+    parser.add_argument("--port", type=int, default=None, help="Порт сервера")
+    parser.add_argument("--name", default=None, help="Имя клиента")
+    parser.add_argument("--socks-port", type=int, default=None, help="Порт SOCKS5 прокси")
+    parser.add_argument("--no-socks", action="store_true", help="Отключить SOCKS5 прокси")
+    parser.add_argument("--mask", default=None, help="Режим маскировки (http/https/traffic)")
+    parser.add_argument("--tunnel", default=None, help="Режим туннеля (icmp/dns/raw)")
+    parser.add_argument("--debug", action="store_true", help="Включить отладочный вывод")
     args = parser.parse_args()
-    
-    config.server_host = args.server
-    config.server_port = args.port
-    config.client_name = args.name
-    config.socks_port = args.socks_port
-    config.mask_mode = args.mask
-    config.tunnel_mode = args.tunnel
+
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    global config
+    config = ClientConfig(env_file=args.env)
+
+    # Параметры командной строки перезаписывают .env
+    if args.server is not None:
+        config.server_host = args.server
+    if args.port is not None:
+        config.server_port = args.port
+    if args.name is not None:
+        config.client_name = args.name
+        config.cert_dir = Path("certs/clients") / config.client_name
+        config.cert_path = config.cert_dir / "client_cert.pem"
+        config.private_path = config.cert_dir / "client_private.pem"
+        config.ca_cert_path = config.cert_dir / "ca_cert.pem"
+    if args.socks_port is not None:
+        config.socks_port = args.socks_port
+    if args.mask is not None:
+        config.mask_mode = args.mask
+    if args.tunnel is not None:
+        config.tunnel_mode = args.tunnel
     if args.no_socks:
         config.socks_enabled = False
-    
+
+    logger.info(f"D3 Stealth VPN Client v0.0.1")
+    logger.info(f"Сервер: {config.server_host}:{config.server_port}")
+    logger.info(f"Клиент: {config.client_name}")
+
     client = D3VPNClient()
     await client.connect()
 
@@ -356,4 +479,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n👋 Выход")
+        logger.info("Выход")

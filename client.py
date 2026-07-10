@@ -270,7 +270,6 @@ class SOCKS5Proxy:
         client_addr = writer.get_extra_info('peername')
         logger.debug(f"SOCKS5 новое соединение: {client_addr}")
         try:
-            # Рукопожатие
             data = await reader.read(2)
             if len(data) < 2 or data[0] != 0x05:
                 logger.warning(f"SOCKS5 неверное рукопожатие от {client_addr}")
@@ -279,7 +278,6 @@ class SOCKS5Proxy:
             writer.write(b"\x05\x00")
             await writer.drain()
             
-            # Запрос
             data = await reader.read(4)
             if len(data) < 4:
                 writer.close()
@@ -296,20 +294,30 @@ class SOCKS5Proxy:
             
             logger.info(f"SOCKS5 запрос: {client_addr} -> {target_ip}:{target_port}")
             
-            # Отправка через D3
-            await self.d3_client._send_data(f"DST:{target_ip}:{target_port}:PAYLOAD:".encode())
+            response = await self.d3_client.send_request(target_ip, target_port, b"", timeout=5)
+            if response is None:
+                logger.warning(f"SOCKS5 таймаут: {target_ip}:{target_port}")
+                fail_resp = struct.pack("!BBBB", 0x05, 0x05, 0x00, 0x01) + addr_data + port_data
+                writer.write(fail_resp)
+                await writer.drain()
+                writer.close()
+                return
             
-            # Ответ
             resp = struct.pack("!BBBB", 0x05, 0x00, 0x00, 0x01) + addr_data + port_data
             writer.write(resp)
             await writer.drain()
             
-            # Проксирование
+            logger.info(f"SOCKS5 подключено: {target_ip}:{target_port}")
+            
             while True:
                 data = await reader.read(4096)
                 if not data:
                     break
-                await self.d3_client._send_data(data)
+                response = await self.d3_client.send_request(target_ip, target_port, data, timeout=5)
+                if response is None:
+                    break
+                writer.write(response)
+                await writer.drain()
                 
         except Exception as e:
             logger.error(f"SOCKS5 ошибка ({client_addr}): {e}")
@@ -331,6 +339,7 @@ class D3VPNClient:
         self.tunnel = TunnelFactory.create(config.tunnel_mode)
         self.socks5 = SOCKS5Proxy(self)
         self.msg_queue = asyncio.Queue()
+        self.pending_requests: Dict[str, asyncio.Future] = {}
     
     async def connect(self):
         logger.info(f"Подключение к {self.config.server_host}:{self.config.server_port}")
@@ -342,7 +351,6 @@ class D3VPNClient:
             )
             logger.info(f"TCP соединение установлено с {self.config.server_host}:{self.config.server_port}")
             
-            # Аутентификация
             cert_pem = self.cert.get_cert_pem()
             nonce = os.urandom(16)
             signature = self.cert.sign(nonce)
@@ -352,9 +360,7 @@ class D3VPNClient:
             masked = await PacketMask.apply(auth, self.config.mask_mode)
             logger.debug(f"Отправка через туннель: {len(masked)} bytes, first10: {masked[:10]!r}")
             await self.tunnel.send(self.writer, masked)
-            logger.debug("Отправлена аутентификация серверу")
             
-            # Ответ
             raw = await self.tunnel.receive(self.reader)
             if raw:
                 data = await PacketMask.remove(raw, self.config.mask_mode)
@@ -369,7 +375,6 @@ class D3VPNClient:
                         self.writer.close()
                         return
 
-                    # Проверка на редирект
                     try:
                         msg = json.loads(data.decode())
                         if msg.get("type") == "redirect":
@@ -391,7 +396,6 @@ class D3VPNClient:
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         logger.warning("Получен неизвестный ответ от сервера")
             
-            # Запуск SOCKS5
             if config.socks_enabled:
                 asyncio.create_task(self.socks5.start())
             
@@ -417,8 +421,20 @@ class D3VPNClient:
                     logger.warning("Соединение с сервером разорвано")
                     break
                 data = await PacketMask.remove(raw, self.config.mask_mode)
-                if data:
-                    await self.msg_queue.put(data)
+                if not data:
+                    continue
+
+                if data.startswith(b"DST:"):
+                    rest = data.split(b"DST:", 1)[1]
+                    ip_port = rest.split(b":PAYLOAD:", 1)[0].decode()
+                    if ip_port in self.pending_requests:
+                        fut = self.pending_requests.pop(ip_port)
+                        if not fut.done():
+                            payload = rest.split(b":PAYLOAD:", 1)[1] if b":PAYLOAD:" in rest else b""
+                            fut.set_result(payload)
+                            continue
+
+                await self.msg_queue.put(data)
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -429,6 +445,19 @@ class D3VPNClient:
     async def _send_data(self, data: bytes):
         masked = await PacketMask.apply(data, self.config.mask_mode)
         await self.tunnel.send(self.writer, masked)
+    
+    async def send_request(self, dst_ip: str, dst_port: int, payload: bytes, timeout: float = 5.0) -> Optional[bytes]:
+        key = f"{dst_ip}:{dst_port}"
+        loop = asyncio.get_event_loop()
+        fut = loop.create_future()
+        self.pending_requests[key] = fut
+        try:
+            await self._send_data(f"DST:{dst_ip}:{dst_port}:PAYLOAD:".encode() + payload)
+            return await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            self.pending_requests.pop(key, None)
+            logger.warning(f"Запрос таймаут: {dst_ip}:{dst_port}")
+            return None
     
     async def _receive_data(self, timeout: float = 5.0) -> Optional[bytes]:
         try:

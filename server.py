@@ -573,41 +573,40 @@ class D3VPNServer:
     
     async def _route_packet(self, data: bytes, sender: str):
         try:
-            if b"DST:" in data:
-                parts = data.split(b"DST:")
-                dest_ip = parts[1].split(b":")[0].decode()
-                
-                if dest_ip in self.routing_table:
-                    target = self.routing_table[dest_ip]
-                    if target in self.clients:
-                        _, writer, _ = self.clients[target]
-                        await self._send(writer, data)
-                elif self.config.allow_internet:
-                    await self._forward_internet(data, sender)
-        except:
-            pass
-    
-    async def _forward_internet(self, data: bytes, client_id: str):
-        try:
             if b"DST:" not in data:
                 return
-            parts = data.split(b"DST:")
-            dest = parts[1].split(b":")[0].decode()
-            dest_ip, dest_port = dest.split(":")
-            dest_port = int(dest_port)
-            
+            rest = data.split(b"DST:", 1)[1]
+            ip_port = rest.split(b":PAYLOAD:", 1)[0]
+            dest_ip_b, dest_port_b = ip_port.split(b":")
+            dest_ip = dest_ip_b.decode()
+            dest_port = int(dest_port_b)
+            payload = rest.split(b":PAYLOAD:", 1)[1] if b":PAYLOAD:" in rest else b""
+
+            target_ip = self.routing_table.get(dest_ip)
+            if target_ip and target_ip in self.clients:
+                _, writer, _ = self.clients[target_ip]
+                await self._send(writer, data)
+            elif self.config.allow_internet:
+                await self._forward_udp(dest_ip, dest_port, payload, sender)
+        except Exception as e:
+            logger.error(f"Маршрутизация: {e}")
+
+    async def _forward_udp(self, dest_ip: str, dest_port: int, payload: bytes, client_id: str):
+        try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            payload = data.split(b"PAYLOAD:")[1] if b"PAYLOAD:" in data else data
+            sock.settimeout(5)
             sock.sendto(payload, (dest_ip, dest_port))
-            
             response, _ = sock.recvfrom(65535)
             sock.close()
-            
+
+            resp_packet = f"DST:{dest_ip}:{dest_port}:PAYLOAD:".encode() + response
             if client_id in self.clients:
                 _, writer, _ = self.clients[client_id]
-                await self._send(writer, response)
+                await self._send(writer, resp_packet)
+        except socket.timeout:
+            logger.warning(f"UDP таймаут: {dest_ip}:{dest_port}")
         except Exception as e:
-            logger.error(f"NAT ошибка для клиента '{client_id}': {e}")
+            logger.error(f"UDP ошибка {dest_ip}:{dest_port}: {e}")
     
     def _assign_ip(self, name: str) -> Optional[str]:
         if name in self.clients:

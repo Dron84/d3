@@ -251,7 +251,7 @@ class CertificateManager:
     def verify_certificate(self, cert_pem: bytes) -> Tuple[bool, Optional[str]]:
         try:
             cert = x509.load_pem_x509_certificate(cert_pem)
-            self.ca_cert.public_key().verify(cert.signature, cert.tbs_certificate_bytes, hashes.SHA256())
+            self.ca_cert.public_key().verify(cert.signature, cert.tbs_certificate_bytes)
             now = datetime.datetime.utcnow()
             if cert.not_valid_before > now or cert.not_valid_after < now:
                 logger.warning("Сертификат клиента просрочен")

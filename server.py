@@ -582,27 +582,35 @@ class D3VPNServer:
             dest_port = int(dest_port_b)
             payload = rest.split(b":PAYLOAD:", 1)[1] if b":PAYLOAD:" in rest else b""
 
+            logger.debug(f"Маршрут: {sender} -> {dest_ip}:{dest_port} ({len(payload)} bytes)")
+
             target_ip = self.routing_table.get(dest_ip)
             if target_ip and target_ip in self.clients:
                 _, writer, _ = self.clients[target_ip]
                 await self._send(writer, data)
             elif self.config.allow_internet:
                 await self._forward_udp(dest_ip, dest_port, payload, sender)
+            else:
+                logger.warning(f"Нет маршрута для {dest_ip} и интернет отключён")
         except Exception as e:
             logger.error(f"Маршрутизация: {e}")
 
     async def _forward_udp(self, dest_ip: str, dest_port: int, payload: bytes, client_id: str):
         try:
+            logger.debug(f"UDP -> {dest_ip}:{dest_port} ({len(payload)} bytes)")
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(5)
             sock.sendto(payload, (dest_ip, dest_port))
             response, _ = sock.recvfrom(65535)
             sock.close()
+            logger.debug(f"UDP <- {dest_ip}:{dest_port} ({len(response)} bytes)")
 
             resp_packet = f"DST:{dest_ip}:{dest_port}:PAYLOAD:".encode() + response
             if client_id in self.clients:
                 _, writer, _ = self.clients[client_id]
                 await self._send(writer, resp_packet)
+            else:
+                logger.warning(f"Клиент {client_id} не найден для ответа")
         except socket.timeout:
             logger.warning(f"UDP таймаут: {dest_ip}:{dest_port}")
         except Exception as e:

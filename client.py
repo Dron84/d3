@@ -424,15 +424,19 @@ class D3VPNClient:
                 if not data:
                     continue
 
+                logger.debug(f"recv_loop: {len(data)} bytes, first20: {data[:20]!r}")
+
                 if data.startswith(b"DST:"):
                     rest = data.split(b"DST:", 1)[1]
                     ip_port = rest.split(b":PAYLOAD:", 1)[0].decode()
+                    logger.debug(f"recv_loop: DST ответ для {ip_port}")
                     if ip_port in self.pending_requests:
                         fut = self.pending_requests.pop(ip_port)
                         if not fut.done():
                             payload = rest.split(b":PAYLOAD:", 1)[1] if b":PAYLOAD:" in rest else b""
                             fut.set_result(payload)
                             continue
+                    logger.debug(f"recv_loop: нет pending для {ip_port}")
 
                 await self.msg_queue.put(data)
         except asyncio.CancelledError:
@@ -452,8 +456,11 @@ class D3VPNClient:
         fut = loop.create_future()
         self.pending_requests[key] = fut
         try:
+            logger.debug(f"send_request: DST:{dst_ip}:{dst_port}:PAYLOAD: ({len(payload)} bytes)")
             await self._send_data(f"DST:{dst_ip}:{dst_port}:PAYLOAD:".encode() + payload)
-            return await asyncio.wait_for(fut, timeout)
+            result = await asyncio.wait_for(fut, timeout)
+            logger.debug(f"send_request: ответ получен ({len(result)} bytes)")
+            return result
         except asyncio.TimeoutError:
             self.pending_requests.pop(key, None)
             logger.warning(f"Запрос таймаут: {dst_ip}:{dst_port}")

@@ -674,13 +674,30 @@ class D3VPNServer:
 
             while True:
                 try:
-                    data = await asyncio.wait_for(reader.read(65535), timeout=30)
-                    if not data:
+                    # Accumulate ALL data until remote closes or long idle
+                    buffered = b""
+                    idle_timeout = 0.5  # 500ms idle = end of response
+                    while True:
+                        try:
+                            data = await asyncio.wait_for(reader.read(65535), timeout=idle_timeout)
+                            if not data:
+                                break
+                            buffered += data
+                            # If we got a big chunk, wait a bit more for potential continuation
+                            if len(data) >= 4096:
+                                idle_timeout = 0.1
+                            else:
+                                idle_timeout = 0.5
+                        except asyncio.TimeoutError:
+                            # Idle timeout - assume end of this response
+                            break
+
+                    if not buffered:
                         break
-                    # Send immediately without buffering - each read = one DST response
-                    resp_packet = f"DST:{dest_ip}:{dest_port}:{req_id}:PAYLOAD:".encode() + data
+
+                    resp_packet = f"DST:{dest_ip}:{dest_port}:{req_id}:PAYLOAD:".encode() + buffered
                     await self._send(client_writer, resp_packet)
-                    logger.debug(f"TCP <- {dest_ip}:{dest_port} ({len(data)} bytes, id={req_id})")
+                    logger.debug(f"TCP <- {dest_ip}:{dest_port} ({len(buffered)} bytes, id={req_id})")
                 except asyncio.TimeoutError:
                     break
 

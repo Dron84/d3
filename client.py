@@ -367,7 +367,7 @@ class SOCKS5Proxy:
                 data = await reader.read(4096)
                 if not data:
                     break
-                response = await self.d3_client._send_and_wait(target_ip, target_port, data, conn_id, timeout=5)
+                response = await self.d3_client._send_stream_data(target_ip, target_port, data, conn_id, timeout=5)
                 if response is None:
                     break
                 writer.write(response)
@@ -394,6 +394,7 @@ class D3VPNClient:
         self.socks5 = SOCKS5Proxy(self)
         self.msg_queue = asyncio.Queue()
         self.pending_requests: Dict[str, asyncio.Future] = {}
+        self._stream_queues: Dict[str, asyncio.Queue] = {}
         self._request_id = 0
     
     async def connect(self):
@@ -494,6 +495,10 @@ class D3VPNClient:
                                 payload = parts[1] if len(parts) > 1 else b""
                                 fut.set_result(payload)
                                 continue
+                        if req_id in self._stream_queues:
+                            payload = parts[1] if len(parts) > 1 else b""
+                            await self._stream_queues[req_id].put(payload)
+                            continue
                     logger.debug(f"recv_loop: нет pending для id={req_id if len(meta_parts) >= 3 else '?'}")
 
                 await self.msg_queue.put(data)
@@ -509,21 +514,48 @@ class D3VPNClient:
         await self.tunnel.send(self.writer, masked)
     
     async def _send_and_wait(self, dst_ip: str, dst_port: int, payload: bytes, conn_id: int, timeout: float = 5.0) -> Optional[bytes]:
-        key = str(conn_id)
+        self._request_id += 1
+        req_id = self._request_id
+        key = str(req_id)
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
         self.pending_requests[key] = fut
+        self._stream_queues[key] = asyncio.Queue()
         try:
-            logger.debug(f"send_and_wait #{conn_id}: DST:{dst_ip}:{dst_port} ({len(payload)} bytes)")
-            await self._send_data(f"DST:{dst_ip}:{dst_port}:{conn_id}:PAYLOAD:".encode() + payload)
+            logger.debug(f"send_and_wait #{req_id}: DST:{dst_ip}:{dst_port} ({len(payload)} bytes)")
+            await self._send_data(f"DST:{dst_ip}:{dst_port}:{req_id}:PAYLOAD:".encode() + payload)
             result = await asyncio.wait_for(fut, timeout)
-            logger.debug(f"send_and_wait #{conn_id}: ответ ({len(result)} bytes)")
+            logger.debug(f"send_and_wait #{req_id}: ответ ({len(result)} bytes)")
             return result
         except asyncio.TimeoutError:
             self.pending_requests.pop(key, None)
-            logger.warning(f"conn #{conn_id} таймаут: {dst_ip}:{dst_port}")
+            self._stream_queues.pop(key, None)
+            logger.warning(f"conn #{req_id} таймаут: {dst_ip}:{dst_port}")
             return None
-    
+
+    async def _send_stream_data(self, dst_ip: str, dst_port: int, payload: bytes, conn_id: int, timeout: float = 5.0) -> Optional[bytes]:
+        """Send data on existing connection and wait for response from stream queue"""
+        key = str(conn_id)
+        if key not in self._stream_queues:
+            logger.warning(f"Stream queue not found for conn_id {conn_id}")
+            return None
+        try:
+            logger.debug(f"send_stream #{conn_id}: DST:{dst_ip}:{dst_port} ({len(payload)} bytes)")
+            await self._send_data(f"DST:{dst_ip}:{dst_port}:{conn_id}:PAYLOAD:".encode() + payload)
+            queue = self._stream_queues[key]
+            result = await asyncio.wait_for(queue.get(), timeout)
+            logger.debug(f"send_stream #{conn_id}: ответ ({len(result)} bytes)")
+            return result
+        except asyncio.TimeoutError:
+            logger.warning(f"stream #{conn_id} таймаут: {dst_ip}:{dst_port}")
+            return None
+
+    async def _close_stream(self, conn_id: int):
+        """Clean up stream queue when connection closes"""
+        key = str(conn_id)
+        self._stream_queues.pop(key, None)
+        self.pending_requests.pop(key, None)
+
     async def send_request(self, dst_ip: str, dst_port: int, payload: bytes, timeout: float = 5.0) -> Optional[bytes]:
         self._request_id += 1
         req_id = self._request_id

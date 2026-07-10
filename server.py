@@ -672,34 +672,22 @@ class D3VPNServer:
                 await writer.drain()
                 logger.debug(f"TCP -> {dest_ip}:{dest_port} ({len(payload)} bytes)")
 
-            while True:
-                try:
-                    # Accumulate ALL data until remote closes or 5s idle (end of response)
-                    buffered = b""
-                    idle_timeout = 5.0  # 5 seconds idle = end of response
-                    while True:
-                        try:
-                            data = await asyncio.wait_for(reader.read(65535), timeout=idle_timeout)
-                            if not data:
-                                break
-                            buffered += data
-                            # If we got a big chunk, wait briefly for more
-                            if len(data) >= 4096:
-                                idle_timeout = 0.5
-                            else:
-                                idle_timeout = 5.0
-                        except asyncio.TimeoutError:
-                            # Idle timeout - assume end of this response
-                            break
-
-                    if not buffered:
+            # Read ALL data until EOF (remote closes) - one complete response per request
+            try:
+                buffered = b""
+                while True:
+                    data = await asyncio.wait_for(reader.read(65535), timeout=30.0)
+                    if not data:
                         break
-
+                    buffered += data
+                if buffered:
                     resp_packet = f"DST:{dest_ip}:{dest_port}:{req_id}:PAYLOAD:".encode() + buffered
                     await self._send(client_writer, resp_packet)
                     logger.debug(f"TCP <- {dest_ip}:{dest_port} ({len(buffered)} bytes, id={req_id})")
-                except asyncio.TimeoutError:
-                    break
+            except asyncio.TimeoutError:
+                pass
+            except Exception as e:
+                logger.debug(f"TCP read error: {e}")
 
             writer.close()
             await writer.wait_closed()

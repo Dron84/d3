@@ -144,8 +144,10 @@ class PacketMask:
             except:
                 return None
         elif mode == "https":
+            logger.debug(f"Mask.remove https: len={len(data)}, first10: {data[:10]!r}")
             if len(data) >= 5 and data[:3] == b"\x17\x03\x03":
                 return data[5:]
+            logger.warning(f"Mask.remove: неожиданные данные: {data[:20]!r}")
             return None
         elif mode == "traffic":
             try:
@@ -172,8 +174,12 @@ class ICMPTunnel(Tunnel):
         await writer.drain()
     async def receive(self, reader) -> Optional[bytes]:
         data = await reader.read(65535)
+        if not data:
+            return None
+        logger.debug(f"Tunnel recv {len(data)} bytes, first20: {data[:20]!r}")
         if data.startswith(b"ICMP:"):
             return data[5:]
+        logger.warning(f"Tunnel: нет префикса ICMP!, first20: {data[:20]!r}")
         return None
 
 class DNSTunnel(Tunnel):

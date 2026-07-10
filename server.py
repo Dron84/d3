@@ -171,6 +171,7 @@ class Tunnel:
 
 class ICMPTunnel(Tunnel):
     async def send(self, writer, data: bytes):
+        logger.debug(f"Tunnel send {len(data)} bytes")
         writer.write(b"ICMP:" + data)
         await writer.drain()
     async def receive(self, reader) -> Optional[bytes]:
@@ -553,10 +554,14 @@ class D3VPNServer:
         while True:
             raw = await self.tunnel.receive(reader)
             if not raw:
+                logger.debug(f"Клиент '{name}': туннель закрыт")
                 break
             data = await PacketMask.remove(raw, self.config.mask_mode)
             if data:
+                logger.debug(f"Клиент '{name}': получен пакет {len(data)} bytes, first20: {data[:20]!r}")
                 await self._route_packet(data, name)
+            else:
+                logger.debug(f"Клиент '{name}': не удалось декодировать пакет")
         
         # Очистка
         if name in self.clients:

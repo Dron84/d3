@@ -270,40 +270,65 @@ class SOCKS5Proxy:
         client_addr = writer.get_extra_info('peername')
         logger.debug(f"SOCKS5 новое соединение: {client_addr}")
         try:
-            data = await reader.read(2)
-            if len(data) < 2 or data[0] != 0x05:
-                logger.warning(f"SOCKS5 неверное рукопожатие от {client_addr}")
+            header = await reader.read(2)
+            if len(header) < 2 or header[0] != 0x05:
+                logger.warning(f"SOCKS5 неверное рукопожатие: {header!r}")
                 writer.close()
                 return
+            
+            nmethods = header[1]
+            methods = await reader.read(nmethods)
+            logger.debug(f"SOCKS5 handshake: ver=0x05 nmethods={nmethods} methods={methods!r}")
+            
             writer.write(b"\x05\x00")
             await writer.drain()
+            logger.debug("SOCKS5 handshake ответ отправлен")
             
-            data = await reader.read(4)
-            if len(data) < 4:
+            req = await reader.read(4)
+            logger.debug(f"SOCKS5 request raw: {req!r} ({len(req)} bytes)")
+            if len(req) < 4:
+                logger.warning(f"SOCKS5 короткий запрос: {req!r}")
                 writer.close()
                 return
             
-            addr_data = await reader.read(4)
-            port_data = await reader.read(2)
-            if len(addr_data) < 4 or len(port_data) < 2:
+            ver, cmd, rsv, atyp = req[0], req[1], req[2], req[3]
+            logger.debug(f"SOCKS5: ver={ver:#x} cmd={cmd:#x} rsv={rsv:#x} atyp={atyp:#x}")
+            
+            if atyp == 0x01:
+                addr_data = await reader.read(4)
+                port_data = await reader.read(2)
+                target_ip = socket.inet_ntoa(addr_data)
+                target_port = struct.unpack("!H", port_data)[0]
+            elif atyp == 0x03:
+                domain_len_data = await reader.read(1)
+                domain = (await reader.read(domain_len_data[0])).decode()
+                port_data = await reader.read(2)
+                target_ip = domain
+                target_port = struct.unpack("!H", port_data)[0]
+            elif atyp == 0x04:
+                addr_data = await reader.read(16)
+                port_data = await reader.read(2)
+                target_ip = socket.inet_ntop(socket.AF_INET6, addr_data)
+                target_port = struct.unpack("!H", port_data)[0]
+            else:
+                logger.warning(f"SOCKS5 неизвестный atyp: {atyp}")
                 writer.close()
                 return
-            
-            target_ip = socket.inet_ntoa(addr_data)
-            target_port = struct.unpack("!H", port_data)[0]
             
             logger.info(f"SOCKS5 запрос: {client_addr} -> {target_ip}:{target_port}")
             
             response = await self.d3_client.send_request(target_ip, target_port, b"", timeout=5)
             if response is None:
                 logger.warning(f"SOCKS5 таймаут: {target_ip}:{target_port}")
-                fail_resp = struct.pack("!BBBB", 0x05, 0x05, 0x00, 0x01) + addr_data + port_data
+                fail_resp = struct.pack("!BBBB", 0x05, 0x05, 0x00, 0x01) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0)
                 writer.write(fail_resp)
                 await writer.drain()
                 writer.close()
                 return
             
-            resp = struct.pack("!BBBB", 0x05, 0x00, 0x00, 0x01) + addr_data + port_data
+            bind_addr = socket.inet_aton("0.0.0.0")
+            bind_port = struct.pack("!H", 0)
+            resp = struct.pack("!BBBB", 0x05, 0x00, 0x00, 0x01) + bind_addr + bind_port
             writer.write(resp)
             await writer.drain()
             
@@ -320,7 +345,7 @@ class SOCKS5Proxy:
                 await writer.drain()
                 
         except Exception as e:
-            logger.error(f"SOCKS5 ошибка ({client_addr}): {e}")
+            logger.error(f"SOCKS5 ошибка ({client_addr}): {e}", exc_info=True)
         finally:
             writer.close()
             logger.debug(f"SOCKS5 соединение закрыто: {client_addr}")

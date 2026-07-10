@@ -230,6 +230,7 @@ class TunnelFactory:
 class CertificateManager:
     def __init__(self):
         self.revoked_certs = set()
+        self.active_connections: Dict[str, Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
         self._load_ca()
     
     def _load_ca(self):
@@ -594,32 +595,66 @@ class D3VPNServer:
                 _, writer, _ = self.clients[target_ip]
                 await self._send(writer, data)
             elif self.config.allow_internet:
-                await self._forward_udp(dest_ip, dest_port, payload, sender)
+                if not payload:
+                    ack = f"DST:{dest_ip}:{dest_port}:PAYLOAD:".encode()
+                    if sender in self.clients:
+                        _, writer, _ = self.clients[sender]
+                        await self._send(writer, ack)
+                        logger.debug(f"ACK отправлен: {sender} <- {dest_ip}:{dest_port}")
+                asyncio.create_task(self._forward_tcp(dest_ip, dest_port, payload, sender))
             else:
                 logger.warning(f"Нет маршрута для {dest_ip} и интернет отключён")
         except Exception as e:
             logger.error(f"Маршрутизация: {e}")
 
-    async def _forward_udp(self, dest_ip: str, dest_port: int, payload: bytes, client_id: str):
-        try:
-            logger.debug(f"UDP -> {dest_ip}:{dest_port} ({len(payload)} bytes)")
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(5)
-            sock.sendto(payload, (dest_ip, dest_port))
-            response, _ = sock.recvfrom(65535)
-            sock.close()
-            logger.debug(f"UDP <- {dest_ip}:{dest_port} ({len(response)} bytes)")
+    async def _forward_tcp(self, dest_ip: str, dest_port: int, payload: bytes, client_id: str):
+        key = f"{dest_ip}:{dest_port}"
 
-            resp_packet = f"DST:{dest_ip}:{dest_port}:PAYLOAD:".encode() + response
-            if client_id in self.clients:
-                _, writer, _ = self.clients[client_id]
-                await self._send(writer, resp_packet)
-            else:
-                logger.warning(f"Клиент {client_id} не найден для ответа")
-        except socket.timeout:
-            logger.warning(f"UDP таймаут: {dest_ip}:{dest_port}")
+        if key in self.active_connections:
+            try:
+                _, writer = self.active_connections[key]
+                if payload:
+                    writer.write(payload)
+                    await writer.drain()
+                    logger.debug(f"TCP -> {dest_ip}:{dest_port} ({len(payload)} bytes)")
+                return
+            except Exception:
+                self.active_connections.pop(key, None)
+
+        try:
+            logger.debug(f"TCP подключение -> {dest_ip}:{dest_port}")
+            reader, writer = await asyncio.open_connection(dest_ip, dest_port)
+            logger.debug(f"TCP подключено: {dest_ip}:{dest_port}")
+            self.active_connections[key] = (reader, writer)
+
+            if client_id not in self.clients:
+                writer.close()
+                self.active_connections.pop(key, None)
+                return
+
+            _, client_writer, _ = self.clients[client_id]
+
+            if payload:
+                writer.write(payload)
+                await writer.drain()
+                logger.debug(f"TCP -> {dest_ip}:{dest_port} ({len(payload)} bytes)")
+
+            while True:
+                try:
+                    data = await asyncio.wait_for(reader.read(4096), timeout=30)
+                    if not data:
+                        break
+                    resp_packet = f"DST:{dest_ip}:{dest_port}:PAYLOAD:".encode() + data
+                    await self._send(client_writer, resp_packet)
+                    logger.debug(f"TCP <- {dest_ip}:{dest_port} ({len(data)} bytes)")
+                except asyncio.TimeoutError:
+                    break
+
+            writer.close()
+            self.active_connections.pop(key, None)
         except Exception as e:
-            logger.error(f"UDP ошибка {dest_ip}:{dest_port}: {e}")
+            logger.error(f"TCP ошибка {dest_ip}:{dest_port}: {e}")
+            self.active_connections.pop(key, None)
     
     def _assign_ip(self, name: str) -> Optional[str]:
         if name in self.clients:

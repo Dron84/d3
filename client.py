@@ -116,11 +116,30 @@ class PacketMask:
             except: return None
         elif mode == "https":
             logger.debug(f"Mask.remove https: len={len(data)}, first10: {data[:10]!r}")
-            if len(data) >= 10 and data[:3] == b"\x16\x03\x03" and data[5:8] == b"\x17\x03\x03":
-                payload_len = struct.unpack(">H", data[8:10])[0]
-                return data[10:10+payload_len]
-            logger.warning(f"Mask.remove: неожиданные данные: {data[:20]!r}")
-            return None
+            result = b""
+            offset = 0
+            while offset < len(data):
+                if offset + 5 > len(data):
+                    logger.warning(f"Mask.remove: неполный заголовок TLS at offset {offset}")
+                    break
+                if data[offset:offset+3] != b"\x16\x03\x03":
+                    logger.warning(f"Mask.remove: неожиданный тип записи: {data[offset:offset+3]!r} at offset {offset}")
+                    break
+                if offset + 5 > len(data):
+                    break
+                record_type = data[offset+5]
+                if record_type != 0x17:  # application data
+                    logger.warning(f"Mask.remove: не application data: {record_type:#x} at offset {offset}")
+                    break
+                if offset + 10 > len(data):
+                    break
+                payload_len = struct.unpack(">H", data[offset+8:offset+10])[0]
+                if offset + 10 + payload_len > len(data):
+                    logger.warning(f"Mask.remove: неполные данные: need {payload_len}, have {len(data) - offset - 10}")
+                    break
+                result += data[offset+10:offset+10+payload_len]
+                offset += 10 + payload_len
+            return result if result else None
         elif mode == "traffic":
             try:
                 for line in data.split(b"\r\n"):
@@ -219,16 +238,16 @@ class CertificateLoader:
 
         # Проверяем приватный ключ
         if config.private_path.exists():
-            import getpass
-            pwd = getpass.getpass(f"Пароль для {config.client_name}: ")
+            # Пытаемся загрузить без пароля, затем из env
+            pwd = os.getenv("CLIENT_KEY_PASSWORD", "")
             try:
                 with open(config.private_path, "rb") as f:
-                    self.private_key = serialization.load_pem_private_key(f.read(), password=pwd.encode())
+                    self.private_key = serialization.load_pem_private_key(f.read(), password=pwd.encode() if pwd else None)
                 logger.info(f"Приватный ключ загружен: {config.private_path}")
             except Exception as e:
                 error_str = str(e).lower()
                 if "password" in error_str or "bad decrypt" in error_str or "invalid" in error_str:
-                    logger.error("Неверный пароль от приватного ключа.")
+                    logger.error("Неверный пароль от приватного ключа. Установите CLIENT_KEY_PASSWORD в .env или используйте ключ без пароля.")
                 else:
                     logger.error(f"Ошибка чтения приватного ключа: {e}")
                 logger.error("Убедитесь, что пароль корректен и файл не повреждён.")

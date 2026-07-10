@@ -230,7 +230,6 @@ class TunnelFactory:
 class CertificateManager:
     def __init__(self):
         self.revoked_certs = set()
-        self.active_connections: Dict[str, Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
         self._load_ca()
     
     def _load_ca(self):
@@ -403,6 +402,7 @@ class D3VPNServer:
         self.ip_pool = self._generate_ip_pool()
         self.routing_table: Dict[str, str] = {}
         self.tunnel = TunnelFactory.create(config.tunnel_mode)
+        self.active_connections: Dict[str, Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = {}
         
         # Балансировка
         self.balancer = None

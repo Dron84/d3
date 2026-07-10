@@ -92,14 +92,20 @@ class PacketMask:
     async def apply(data: bytes, mode: str) -> bytes:
         if mode == "http":
             headers = [f"GET /{os.urandom(8).hex()} HTTP/1.1", f"Host: {os.urandom(6).hex()}.com",
-                      f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)", f"Content-Length: {len(data)}", "", ""]
+                       f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)", f"Content-Length: {len(data)}", "", ""]
             return "\r\n".join(headers).encode() + data
         elif mode == "https":
-            tls_header = b"\x16\x03\x03" + struct.pack(">H", len(data) + 5)
-            return tls_header + b"\x17\x03\x03" + struct.pack(">H", len(data)) + data
+            max_fragment = 16384
+            result = b""
+            for i in range(0, len(data), max_fragment):
+                chunk = data[i:i+max_fragment]
+                tls_header = b"\x16\x03\x03" + struct.pack(">H", len(chunk) + 5)
+                tls_record = b"\x17\x03\x03" + struct.pack(">H", len(chunk)) + chunk
+                result += tls_header + tls_record
+            return result
         elif mode == "traffic":
             headers = [f"GET /{os.urandom(8).hex()} HTTP/1.1", f"Host: {os.urandom(6).hex()}.com",
-                      f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)", f"X-D3-Data: {data.hex()}", "", ""]
+                       f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)", f"X-D3-Data: {data.hex()}", "", ""]
             return "\r\n".join(headers).encode()
         return data
     

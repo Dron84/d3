@@ -119,9 +119,14 @@ class PacketMask:
             ]
             return "\r\n".join(headers).encode() + data
         elif mode == "https":
-            tls_header = b"\x16\x03\x03" + struct.pack(">H", len(data) + 5)
-            tls_record = b"\x17\x03\x03" + struct.pack(">H", len(data)) + data
-            return tls_header + tls_record
+            max_fragment = 16384
+            result = b""
+            for i in range(0, len(data), max_fragment):
+                chunk = data[i:i+max_fragment]
+                tls_header = b"\x16\x03\x03" + struct.pack(">H", len(chunk) + 5)
+                tls_record = b"\x17\x03\x03" + struct.pack(">H", len(chunk)) + chunk
+                result += tls_header + tls_record
+            return result
         elif mode == "traffic":
             headers = [
                 f"GET /{os.urandom(8).hex()} HTTP/1.1",
@@ -615,13 +620,18 @@ class D3VPNServer:
 
         if key in self.active_connections:
             try:
-                _, writer = self.active_connections[key]
+                reader, writer = self.active_connections[key]
                 if payload:
                     writer.write(payload)
                     await writer.drain()
                     logger.debug(f"TCP -> {dest_ip}:{dest_port} ({len(payload)} bytes)")
                 return
             except Exception:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
                 self.active_connections.pop(key, None)
 
         try:
@@ -632,6 +642,7 @@ class D3VPNServer:
 
             if client_id not in self.clients:
                 writer.close()
+                await writer.wait_closed()
                 self.active_connections.pop(key, None)
                 return
 
@@ -668,6 +679,7 @@ class D3VPNServer:
                     break
 
             writer.close()
+            await writer.wait_closed()
             self.active_connections.pop(key, None)
         except Exception as e:
             logger.error(f"TCP ошибка {dest_ip}:{dest_port}: {e}")

@@ -145,8 +145,9 @@ class PacketMask:
                 return None
         elif mode == "https":
             logger.debug(f"Mask.remove https: len={len(data)}, first10: {data[:10]!r}")
-            if len(data) >= 5 and data[:3] == b"\x17\x03\x03":
-                return data[5:]
+            if len(data) >= 10 and data[:3] == b"\x16\x03\x03" and data[5:8] == b"\x17\x03\x03":
+                payload_len = struct.unpack(">H", data[8:10])[0]
+                return data[10:10+payload_len]
             logger.warning(f"Mask.remove: неожиданные данные: {data[:20]!r}")
             return None
         elif mode == "traffic":

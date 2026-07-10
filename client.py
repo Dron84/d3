@@ -134,17 +134,18 @@ class Tunnel:
 class ICMPTunnel(Tunnel):
     async def send(self, writer, data: bytes):
         logger.debug(f"Tunnel send {len(data)} bytes")
-        writer.write(b"ICMP:" + data)
+        frame = b"ICMP:" + struct.pack(">I", len(data)) + data
+        writer.write(frame)
         await writer.drain()
     async def receive(self, reader) -> Optional[bytes]:
-        data = await reader.read(65535)
-        if not data:
+        header = await reader.readexactly(5)
+        if not header or header[:4] != b"ICMP":
+            logger.warning(f"Tunnel: неверный префикс: {header!r}")
             return None
-        logger.debug(f"Tunnel recv {len(data)} bytes, first20: {data[:20]!r}")
-        if data.startswith(b"ICMP:"):
-            return data[5:]
-        logger.warning(f"Tunnel: нет префикса ICMP!, first20: {data[:20]!r}")
-        return None
+        length_bytes = await reader.readexactly(4)
+        length = struct.unpack(">I", length_bytes)[0]
+        data = await reader.readexactly(length)
+        return data
 
 class DNSTunnel(Tunnel):
     def __init__(self):
@@ -365,6 +366,7 @@ class D3VPNClient:
         self.socks5 = SOCKS5Proxy(self)
         self.msg_queue = asyncio.Queue()
         self.pending_requests: Dict[str, asyncio.Future] = {}
+        self._request_id = 0
     
     async def connect(self):
         logger.info(f"Подключение к {self.config.server_host}:{self.config.server_port}")
@@ -453,15 +455,18 @@ class D3VPNClient:
 
                 if data.startswith(b"DST:"):
                     rest = data.split(b"DST:", 1)[1]
-                    ip_port = rest.split(b":PAYLOAD:", 1)[0].decode()
-                    logger.debug(f"recv_loop: DST ответ для {ip_port}")
-                    if ip_port in self.pending_requests:
-                        fut = self.pending_requests.pop(ip_port)
-                        if not fut.done():
-                            payload = rest.split(b":PAYLOAD:", 1)[1] if b":PAYLOAD:" in rest else b""
-                            fut.set_result(payload)
-                            continue
-                    logger.debug(f"recv_loop: нет pending для {ip_port}")
+                    parts = rest.split(b":PAYLOAD:", 1)
+                    meta = parts[0].decode()
+                    meta_parts = meta.split(":")
+                    if len(meta_parts) >= 3:
+                        req_id = meta_parts[2]
+                        if req_id in self.pending_requests:
+                            fut = self.pending_requests.pop(req_id)
+                            if not fut.done():
+                                payload = parts[1] if len(parts) > 1 else b""
+                                fut.set_result(payload)
+                                continue
+                    logger.debug(f"recv_loop: нет pending для id={req_id if len(meta_parts) >= 3 else '?'}")
 
                 await self.msg_queue.put(data)
         except asyncio.CancelledError:
@@ -476,19 +481,21 @@ class D3VPNClient:
         await self.tunnel.send(self.writer, masked)
     
     async def send_request(self, dst_ip: str, dst_port: int, payload: bytes, timeout: float = 5.0) -> Optional[bytes]:
-        key = f"{dst_ip}:{dst_port}"
+        self._request_id += 1
+        req_id = self._request_id
+        key = str(req_id)
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
         self.pending_requests[key] = fut
         try:
-            logger.debug(f"send_request: DST:{dst_ip}:{dst_port}:PAYLOAD: ({len(payload)} bytes)")
-            await self._send_data(f"DST:{dst_ip}:{dst_port}:PAYLOAD:".encode() + payload)
+            logger.debug(f"send_request #{req_id}: DST:{dst_ip}:{dst_port}:PAYLOAD: ({len(payload)} bytes)")
+            await self._send_data(f"DST:{dst_ip}:{dst_port}:{req_id}:PAYLOAD:".encode() + payload)
             result = await asyncio.wait_for(fut, timeout)
-            logger.debug(f"send_request: ответ получен ({len(result)} bytes)")
+            logger.debug(f"send_request #{req_id}: ответ получен ({len(result)} bytes)")
             return result
         except asyncio.TimeoutError:
             self.pending_requests.pop(key, None)
-            logger.warning(f"Запрос таймаут: {dst_ip}:{dst_port}")
+            logger.warning(f"Запрос #{req_id} таймаут: {dst_ip}:{dst_port}")
             return None
     
     async def _receive_data(self, timeout: float = 5.0) -> Optional[bytes]:

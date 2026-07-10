@@ -172,17 +172,18 @@ class Tunnel:
 class ICMPTunnel(Tunnel):
     async def send(self, writer, data: bytes):
         logger.debug(f"Tunnel send {len(data)} bytes")
-        writer.write(b"ICMP:" + data)
+        frame = b"ICMP:" + struct.pack(">I", len(data)) + data
+        writer.write(frame)
         await writer.drain()
     async def receive(self, reader) -> Optional[bytes]:
-        data = await reader.read(65535)
-        if not data:
+        header = await reader.readexactly(5)
+        if not header or header[:4] != b"ICMP":
+            logger.warning(f"Tunnel: неверный префикс: {header!r}")
             return None
-        logger.debug(f"Tunnel recv {len(data)} bytes, first20: {data[:20]!r}")
-        if data.startswith(b"ICMP:"):
-            return data[5:]
-        logger.warning(f"Tunnel: нет префикса ICMP!, first20: {data[:20]!r}")
-        return None
+        length_bytes = await reader.readexactly(4)
+        length = struct.unpack(">I", length_bytes)[0]
+        data = await reader.readexactly(length)
+        return data
 
 class DNSTunnel(Tunnel):
     def __init__(self):
@@ -582,13 +583,15 @@ class D3VPNServer:
             if b"DST:" not in data:
                 return
             rest = data.split(b"DST:", 1)[1]
-            ip_port = rest.split(b":PAYLOAD:", 1)[0]
-            dest_ip_b, dest_port_b = ip_port.split(b":")
-            dest_ip = dest_ip_b.decode()
-            dest_port = int(dest_port_b)
-            payload = rest.split(b":PAYLOAD:", 1)[1] if b":PAYLOAD:" in rest else b""
+            meta_payload = rest.split(b":PAYLOAD:", 1)
+            meta = meta_payload[0].decode()
+            meta_parts = meta.split(":")
+            dest_ip = meta_parts[0]
+            dest_port = int(meta_parts[1])
+            req_id = meta_parts[2] if len(meta_parts) >= 3 else ""
+            payload = meta_payload[1] if len(meta_payload) > 1 else b""
 
-            logger.debug(f"Маршрут: {sender} -> {dest_ip}:{dest_port} ({len(payload)} bytes)")
+            logger.debug(f"Маршрут: {sender} -> {dest_ip}:{dest_port} id={req_id} ({len(payload)} bytes)")
 
             target_ip = self.routing_table.get(dest_ip)
             if target_ip and target_ip in self.clients:
@@ -596,18 +599,18 @@ class D3VPNServer:
                 await self._send(writer, data)
             elif self.config.allow_internet:
                 if not payload:
-                    ack = f"DST:{dest_ip}:{dest_port}:PAYLOAD:".encode()
+                    ack = f"DST:{dest_ip}:{dest_port}:{req_id}:PAYLOAD:".encode()
                     if sender in self.clients:
                         _, writer, _ = self.clients[sender]
                         await self._send(writer, ack)
-                        logger.debug(f"ACK отправлен: {sender} <- {dest_ip}:{dest_port}")
-                asyncio.create_task(self._forward_tcp(dest_ip, dest_port, payload, sender))
+                        logger.debug(f"ACK #{req_id} отправлен: {sender} <- {dest_ip}:{dest_port}")
+                asyncio.create_task(self._forward_tcp(dest_ip, dest_port, req_id, payload, sender))
             else:
                 logger.warning(f"Нет маршрута для {dest_ip} и интернет отключён")
         except Exception as e:
             logger.error(f"Маршрутизация: {e}")
 
-    async def _forward_tcp(self, dest_ip: str, dest_port: int, payload: bytes, client_id: str):
+    async def _forward_tcp(self, dest_ip: str, dest_port: int, req_id: str, payload: bytes, client_id: str):
         key = f"{dest_ip}:{dest_port}"
 
         if key in self.active_connections:
@@ -644,7 +647,7 @@ class D3VPNServer:
                     data = await asyncio.wait_for(reader.read(4096), timeout=30)
                     if not data:
                         break
-                    resp_packet = f"DST:{dest_ip}:{dest_port}:PAYLOAD:".encode() + data
+                    resp_packet = f"DST:{dest_ip}:{dest_port}:{req_id}:PAYLOAD:".encode() + data
                     await self._send(client_writer, resp_packet)
                     logger.debug(f"TCP <- {dest_ip}:{dest_port} ({len(data)} bytes)")
                 except asyncio.TimeoutError:

@@ -674,40 +674,13 @@ class D3VPNServer:
 
             while True:
                 try:
-                    buffered = b""
-                    # Read continuously - accumulate all data until remote closes or long idle
-                    while True:
-                        try:
-                            data = await asyncio.wait_for(reader.read(65535), timeout=15.0)
-                            if not data:
-                                break
-                            buffered += data
-                            # If we got a substantial chunk, quickly check for more
-                            if len(data) >= 4096:
-                                try:
-                                    chunk = await asyncio.wait_for(reader.read(65535), timeout=0.1)
-                                    if chunk:
-                                        buffered += chunk
-                                except asyncio.TimeoutError:
-                                    pass
-                            else:
-                                # Small read - might be end of this response burst
-                                try:
-                                    chunk = await asyncio.wait_for(reader.read(65535), timeout=0.5)
-                                    if chunk:
-                                        buffered += chunk
-                                        continue  # keep reading
-                                except asyncio.TimeoutError:
-                                    break
-                        except asyncio.TimeoutError:
-                            break
-
-                    if not buffered:
+                    data = await asyncio.wait_for(reader.read(65535), timeout=30)
+                    if not data:
                         break
-
-                    resp_packet = f"DST:{dest_ip}:{dest_port}:{req_id}:PAYLOAD:".encode() + buffered
+                    # Send immediately without buffering - each read = one DST response
+                    resp_packet = f"DST:{dest_ip}:{dest_port}:{req_id}:PAYLOAD:".encode() + data
                     await self._send(client_writer, resp_packet)
-                    logger.debug(f"TCP <- {dest_ip}:{dest_port} ({len(buffered)} bytes, id={req_id})")
+                    logger.debug(f"TCP <- {dest_ip}:{dest_port} ({len(data)} bytes, id={req_id})")
                 except asyncio.TimeoutError:
                     break
 

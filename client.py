@@ -238,16 +238,16 @@ class CertificateLoader:
 
         # Проверяем приватный ключ
         if config.private_path.exists():
-            # Пытаемся загрузить без пароля, затем из env
-            pwd = os.getenv("CLIENT_KEY_PASSWORD", "")
+            import getpass
+            pwd = getpass.getpass(f"Пароль для {config.client_name}: ")
             try:
                 with open(config.private_path, "rb") as f:
-                    self.private_key = serialization.load_pem_private_key(f.read(), password=pwd.encode() if pwd else None)
+                    self.private_key = serialization.load_pem_private_key(f.read(), password=pwd.encode())
                 logger.info(f"Приватный ключ загружен: {config.private_path}")
             except Exception as e:
                 error_str = str(e).lower()
                 if "password" in error_str or "bad decrypt" in error_str or "invalid" in error_str:
-                    logger.error("Неверный пароль от приватного ключа. Установите CLIENT_KEY_PASSWORD в .env или используйте ключ без пароля.")
+                    logger.error("Неверный пароль от приватного ключа.")
                 else:
                     logger.error(f"Ошибка чтения приватного ключа: {e}")
                 logger.error("Убедитесь, что пароль корректен и файл не повреждён.")

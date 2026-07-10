@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-D3 Stealth VPN Server v7.0.0
+D3 Stealth VPN Server v1.0.0
 Поддерживает: каскадное подключение, балансировку нагрузки, маскировку, туннели
 ВСЁ В ОДНОМ ФАЙЛЕ
 """
@@ -406,7 +406,7 @@ class D3VPNServer:
         return list(network.hosts())[1:]
     
     async def start(self):
-        print(f"🚀 D3 Stealth VPN Server v7.0.0")
+        print(f"🚀 D3 Stealth VPN Server v1.0.0")
         print(f"📡 {self.config.host}:{self.config.port}")
         print(f"🔌 Туннель: {self.config.tunnel_mode}")
         print(f"🎭 Маскировка: {self.config.mask_mode}")

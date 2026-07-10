@@ -318,7 +318,10 @@ class SOCKS5Proxy:
             
             logger.info(f"SOCKS5 запрос: {client_addr} -> {target_ip}:{target_port}")
             
-            response = await self.d3_client.send_request(target_ip, target_port, b"", timeout=5)
+            self.d3_client._request_id += 1
+            conn_id = self.d3_client._request_id
+            
+            response = await self.d3_client._send_and_wait(target_ip, target_port, b"", conn_id, timeout=5)
             if response is None:
                 logger.warning(f"SOCKS5 таймаут: {target_ip}:{target_port}")
                 fail_resp = struct.pack("!BBBB", 0x05, 0x05, 0x00, 0x01) + socket.inet_aton("0.0.0.0") + struct.pack("!H", 0)
@@ -339,7 +342,7 @@ class SOCKS5Proxy:
                 data = await reader.read(4096)
                 if not data:
                     break
-                response = await self.d3_client.send_request(target_ip, target_port, data, timeout=5)
+                response = await self.d3_client._send_and_wait(target_ip, target_port, data, conn_id, timeout=5)
                 if response is None:
                     break
                 writer.write(response)
@@ -479,6 +482,22 @@ class D3VPNClient:
     async def _send_data(self, data: bytes):
         masked = await PacketMask.apply(data, self.config.mask_mode)
         await self.tunnel.send(self.writer, masked)
+    
+    async def _send_and_wait(self, dst_ip: str, dst_port: int, payload: bytes, conn_id: int, timeout: float = 5.0) -> Optional[bytes]:
+        key = str(conn_id)
+        loop = asyncio.get_event_loop()
+        fut = loop.create_future()
+        self.pending_requests[key] = fut
+        try:
+            logger.debug(f"send_and_wait #{conn_id}: DST:{dst_ip}:{dst_port} ({len(payload)} bytes)")
+            await self._send_data(f"DST:{dst_ip}:{dst_port}:{conn_id}:PAYLOAD:".encode() + payload)
+            result = await asyncio.wait_for(fut, timeout)
+            logger.debug(f"send_and_wait #{conn_id}: ответ ({len(result)} bytes)")
+            return result
+        except asyncio.TimeoutError:
+            self.pending_requests.pop(key, None)
+            logger.warning(f"conn #{conn_id} таймаут: {dst_ip}:{dst_port}")
+            return None
     
     async def send_request(self, dst_ip: str, dst_port: int, payload: bytes, timeout: float = 5.0) -> Optional[bytes]:
         self._request_id += 1

@@ -1,0 +1,6 @@
+.env.server
+.env.client
+certs/**
+__pycache__
+dist/**
+build/**

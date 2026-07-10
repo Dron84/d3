@@ -1,0 +1,14 @@
+version: '3.8'
+services:
+  d3-vpn:
+    build: .
+    ports:
+      - "6666:6666"
+      - "1080:1080"
+    environment:
+      - SERVER_HOST=0.0.0.0
+      - ALLOW_INTERNET=true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped

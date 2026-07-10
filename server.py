@@ -672,7 +672,7 @@ class D3VPNServer:
                 await writer.drain()
                 logger.debug(f"TCP -> {dest_ip}:{dest_port} ({len(payload)} bytes)")
 
-while True:
+            while True:
                 try:
                     # Accumulate ALL data until remote closes or 5s idle (end of response)
                     buffered = b""
